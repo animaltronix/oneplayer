@@ -26,7 +26,7 @@
   #stage video, #stage iframe { position:absolute; inset:0; width:100%; height:100%; border:0; object-fit:cover; }
   #stage iframe { pointer-events:none; }
   /* Starfield: one big randomly drawn sky (no tiling) as wide as the screen's diagonal, slowly rotating */
-  .space { position:absolute; top:50%; left:50%; animation:spin 210s linear infinite; }
+  .space { position:absolute; top:50%; left:50%; animation:spin 420s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .space { animation:none; } }
   /* Animated effects draw on one canvas that fills the stage */
@@ -619,7 +619,7 @@ renderTracks();
 
 // ---- Starfield (shown whenever no video is loaded) ----
 // A fresh random sky is drawn on every page load: one canvas as wide as the screen's diagonal,
-// so it covers the window at every angle while it turns once every 210 s, with no repeating tile.
+// so it covers the window at every angle while it turns once every 420 s, with no repeating tile.
 // Most stars are faint pinpoints, a few are bright with a soft glow, colors run from blue-white to
 // warm, and a faint diagonal band of extra dim stars hints at the Milky Way.
 let skyCanvas = null;
@@ -768,7 +768,7 @@ function rainFx(g) {
   const WIND = -0.12;   // horizontal slant per unit of fall
   const drop = (w, h, anywhere) => {
     const d = R();
-    return { d, x: R() * (w + h * 0.15), y: anywhere ? R() * h : -40 - R() * 60, len: 7 + d * 17, v: 260 + d * 340,
+    return { d, x: R() * (w + h * 0.15), y: anywhere ? R() * h : -40 - R() * 60, len: 5 + d * 13, v: 130 + d * 170,
              a: 0.07 + d * 0.28, lw: 0.6 + d * 0.9, land: h * (0.86 + R() * 0.14) };
   };
   return {
