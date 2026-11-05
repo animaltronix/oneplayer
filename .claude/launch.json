@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "ice-player",
+      "name": "one-player",
       "runtimeExecutable": "python3",
       "runtimeArgs": ["serve.py", "8080"],
       "port": 8080

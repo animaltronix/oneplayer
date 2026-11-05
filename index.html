@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Some stations (e.g. SomaFM) refuse streams requested from other sites' pages, as a player app we send no referrer -->
 <meta name="referrer" content="no-referrer">
-<title>Ice Player</title>
+<title>One Player</title>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dashjs@4.7.4/dist/dash.all.min.js"></script>
 <style>
@@ -200,7 +200,7 @@
 <nav class="dock glass" aria-label="Player controls">
   <button id="playToggle" class="ib primary" title="Play"><svg class="i"><use href="#i-play"/></svg></button>
   <button id="mini" class="mini" data-panel="tracks" title="Track info">
-    <b id="miniTitle">Ice Player</b><span id="miniStation">Pick a station to start</span>
+    <b id="miniTitle">One Player</b><span id="miniStation">Pick a station to start</span>
   </button>
   <div class="sep"></div>
   <button class="ib" data-panel="audio" title="Stations"><svg class="i"><use href="#i-radio"/></svg></button>
@@ -508,7 +508,7 @@ function stopTrackInfo() {
   trackTimer = null; trackUrl = null; nowTrack = null;
   $('npTitle').textContent = 'Nothing playing';
   $('npStation').textContent = '';
-  if (!connecting) setMini('Ice Player', 'Pick a station to start');
+  if (!connecting) setMini('One Player', 'Pick a station to start');
   updateSaveButton();
 }
 

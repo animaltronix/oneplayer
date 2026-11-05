@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Double-click to serve Ice Player locally and open it in Chrome.
+# Double-click to serve One Player locally and open it in Chrome.
 cd "$(dirname "$0")"
 PORT=8080
 # Reuse a server that's already running on the port
@@ -8,5 +8,5 @@ if ! curl -s -o /dev/null "http://localhost:$PORT/"; then
   sleep 1
 fi
 open -a "Google Chrome" "http://localhost:$PORT/" 2>/dev/null || open "http://localhost:$PORT/"
-echo "Ice Player is running at http://localhost:$PORT  (close this window to stop it)"
+echo "One Player is running at http://localhost:$PORT  (close this window to stop it)"
 wait

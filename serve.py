@@ -1,4 +1,4 @@
-# Serves Ice Player locally, telling the browser never to use a stale cached copy.
+# Serves One Player locally, telling the browser never to use a stale cached copy.
 import http.server, sys
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
