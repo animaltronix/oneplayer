@@ -25,9 +25,8 @@
   #stage { position:fixed; inset:0; overflow:hidden; background:var(--bg); }
   #stage video, #stage iframe { position:absolute; inset:0; width:100%; height:100%; border:0; object-fit:cover; }
   #stage iframe { pointer-events:none; }
-  /* Starfield: a tiled layer of tiny stars, 4x the window, slowly rotating (as on animaltronix.com) */
-  .space { position:absolute; width:400vw; height:400vh; top:50%; left:50%; margin:-200vh 0 0 -200vw;
-           background-size:240px 240px; animation:spin 105s linear infinite; }
+  /* Starfield: one big randomly drawn sky (no tiling) as wide as the screen's diagonal, slowly rotating */
+  .space { position:absolute; top:50%; left:50%; animation:spin 105s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .space { animation:none; } }
 
@@ -527,24 +526,88 @@ $('savedDownload').onclick = () => {
 renderTracks();
 
 // ---- Starfield (shown whenever no video is loaded) ----
-// Same recipe as animaltronix.com: a 240px tile of 22 white squares (17 at 1px, 4 at 2px, 1 at 3px),
-// tiled over a layer 4x the window that turns once every 105 s. Positions come from a fixed seed.
-function starTile() {
-  let seed = 240;
-  const rand = () => (seed = seed * 16807 % 2147483647) / 2147483647;
-  const sizes = [...Array(17).fill(1), ...Array(4).fill(2), 3];
-  const rects = sizes.map(s => `<rect x="${Math.floor(rand() * (240 - s))}" y="${Math.floor(rand() * (240 - s))}" width="${s}" height="${s}" fill="#fff"/>`).join('');
-  return `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">${rects}</svg>`)}")`;
+// A fresh random sky is drawn on every page load: one canvas as wide as the screen's diagonal,
+// so it covers the window at every angle while it turns once every 105 s, with no repeating tile.
+// Most stars are faint pinpoints, a few are bright with a soft glow, colors run from blue-white to
+// warm, and a faint diagonal band of extra dim stars hints at the Milky Way.
+let skyCanvas = null;
+
+function skySize() {
+  const w = Math.max(screen.width, innerWidth), h = Math.max(screen.height, innerHeight);
+  return Math.ceil(Math.hypot(w, h)) + 4;
 }
-const STAR_TILE = starTile();
+
+function drawSky(size) {
+  const scale = Math.min(devicePixelRatio || 1, 4096 / size);   // keep the bitmap a sane size
+  const c = document.createElement('canvas');
+  c.className = 'space';
+  c.width = c.height = Math.round(size * scale);
+  Object.assign(c.style, { width: size + 'px', height: size + 'px', margin: `${-size / 2}px 0 0 ${-size / 2}px` });
+  const g = c.getContext('2d');
+  g.scale(scale, scale);
+  g.fillStyle = '#0b0b0f';
+  g.fillRect(0, 0, size, size);
+
+  const R = Math.random;
+  const tints = ['255,255,255', '255,255,255', '255,255,255', '200,220,255', '170,200,255', '255,240,215', '255,214,170'];
+  const star = (x, y, r, a, tint) => {
+    g.fillStyle = `rgba(${tint},${a})`;
+    if (r < 0.9) g.fillRect(x, y, r * 1.6, r * 1.6);           // tiny ones as crisp pixels
+    else { g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); }
+  };
+
+  // Faint glow of the band, then the stars
+  const angle = R() * Math.PI, nx = Math.cos(angle), ny = Math.sin(angle), mid = size / 2;
+  const across = (x, y) => (x - mid) * -ny + (y - mid) * nx;   // distance from the band's center line
+  const bandWidth = size * (0.08 + R() * 0.06);
+  g.save();
+  g.translate(mid, mid); g.rotate(angle);
+  const haze = g.createLinearGradient(0, -bandWidth * 2, 0, bandWidth * 2);
+  haze.addColorStop(0, 'rgba(120,130,170,0)');
+  haze.addColorStop(0.5, 'rgba(120,130,170,0.045)');
+  haze.addColorStop(1, 'rgba(120,130,170,0)');
+  g.fillStyle = haze;
+  g.fillRect(-size, -bandWidth * 2, size * 2, bandWidth * 4);
+  g.restore();
+
+  const area = size * size;
+  const count = Math.round(area / 2600);                        // general sky
+  for (let i = 0; i < count; i++) {
+    const p = R() ** 3;                                         // skewed: mostly small and faint
+    star(R() * size, R() * size, 0.35 + p * 1.3, 0.25 + R() * 0.55 + p * 0.2, tints[(R() * tints.length) | 0]);
+  }
+  const bandCount = Math.round(area / 3200);                    // extra dim stars crowding the band
+  for (let i = 0; i < bandCount; i++) {
+    const x = R() * size, y = R() * size;
+    const d = across(x, y) / bandWidth;
+    if (R() > Math.exp(-d * d)) continue;
+    star(x, y, 0.3 + R() * 0.45, 0.2 + R() * 0.4, tints[(R() * tints.length) | 0]);
+  }
+  const bright = Math.max(6, Math.round(area / 180000));        // a handful of bright stars with halos
+  for (let i = 0; i < bright; i++) {
+    const x = R() * size, y = R() * size, r = 1.1 + R() * 1.1, tint = tints[(R() * tints.length) | 0];
+    const glow = g.createRadialGradient(x, y, 0, x, y, r * 6);
+    glow.addColorStop(0, `rgba(${tint},0.35)`);
+    glow.addColorStop(1, `rgba(${tint},0)`);
+    g.fillStyle = glow;
+    g.beginPath(); g.arc(x, y, r * 6, 0, Math.PI * 2); g.fill();
+    star(x, y, r, 1, tint);
+  }
+  return c;
+}
 
 function showStarfield() {
   videoEngine?.(); videoEngine = null;
-  const space = Object.assign(document.createElement('div'), { className: 'space' });
-  space.style.backgroundImage = STAR_TILE;
-  stage.replaceChildren(space);
+  const size = skySize();
+  if (!skyCanvas || parseFloat(skyCanvas.style.width) < size) skyCanvas = drawSky(size);
+  stage.replaceChildren(skyCanvas);
   $('videoStatus').textContent = 'Showing the starfield';
 }
+
+// If the window grows past the screen size (e.g. an external display), draw a bigger sky
+addEventListener('resize', () => {
+  if (skyCanvas?.isConnected && parseFloat(skyCanvas.style.width) < skySize()) showStarfield();
+});
 
 // ---- Video ----
 function embedUrl(url) {
