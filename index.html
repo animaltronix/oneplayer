@@ -29,6 +29,8 @@
   .space { position:absolute; top:50%; left:50%; animation:spin 105s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .space { animation:none; } }
+  /* Animated effects draw on one canvas that fills the stage */
+  .fx { position:absolute; inset:0; width:100%; height:100%; display:block; }
 
   /* ---- Glass surfaces ---- */
   .glass { background:var(--glass); border:1px solid var(--line); box-shadow:0 12px 40px rgba(0,0,0,.45);
@@ -76,6 +78,10 @@
   .btn .i { width:16px; height:16px; }
   .status { font-size:12px; color:var(--muted); min-height:1em; }
   input[type=range] { width:100%; accent-color:var(--fg); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { height:30px; padding:0 12px; border:1px solid var(--line); border-radius:999px; background:var(--hover); font-size:12px; cursor:pointer; }
+  .chip:hover { background:rgba(255,255,255,.14); }
+  .chip[aria-pressed="true"] { background:var(--fg); color:#111; border-color:var(--fg); font-weight:600; }
 
   .list { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:minmax(0, 1fr); gap:2px; }
   .list:empty::before { content:attr(data-empty); display:block; padding:4px 10px; font-size:12px; color:var(--muted); }
@@ -168,10 +174,9 @@
     <button id="videoLoad" class="btn">Load</button>
     <button id="videoSave" class="ib" title="Save to favorites"><svg class="i"><use href="#i-bookmark"/></svg></button>
   </div>
-  <div class="row">
-    <div id="videoStatus" class="status" style="flex:1">Showing the starfield</div>
-    <button id="videoClear" class="btn ghost" title="Stop the video and show the starfield"><svg class="i"><use href="#i-sparkle"/></svg>Starfield</button>
-  </div>
+  <div id="videoStatus" class="status">Showing the starfield</div>
+  <h3>Effects</h3>
+  <div id="fxChips" class="chips" role="group" aria-label="Background effects"></div>
   <h3>Favorite videos</h3>
   <ul id="videoFavs" class="list" data-empty="No favorites yet: enter a URL and press the bookmark"></ul>
 </section>
@@ -596,18 +601,252 @@ function drawSky(size) {
   return c;
 }
 
-function showStarfield() {
-  videoEngine?.(); videoEngine = null;
-  const size = skySize();
-  if (!skyCanvas || parseFloat(skyCanvas.style.width) < size) skyCanvas = drawSky(size);
-  stage.replaceChildren(skyCanvas);
-  $('videoStatus').textContent = 'Showing the starfield';
+function starsFx() {
+  const fit = () => {
+    if (!skyCanvas || parseFloat(skyCanvas.style.width) < skySize()) skyCanvas = drawSky(skySize());
+    if (!skyCanvas.isConnected) stage.replaceChildren(skyCanvas);
+  };
+  fit();
+  // If the window grows past the screen size (e.g. an external display), draw a bigger sky
+  addEventListener('resize', fit);
+  return () => removeEventListener('resize', fit);
 }
 
-// If the window grows past the screen size (e.g. an external display), draw a bigger sky
-addEventListener('resize', () => {
-  if (skyCanvas?.isConnected && parseFloat(skyCanvas.style.width) < skySize()) showStarfield();
-});
+// ---- Animated effects ----
+// Each effect gets a canvas filling the window and a frame(dt, t, w, h) call per animation frame,
+// in CSS pixels. The browser pauses frames while the tab is hidden; with reduced motion, one still frame.
+const R = Math.random;
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function canvasFx(make, lowRes) {
+  const c = Object.assign(document.createElement('canvas'), { className: 'fx' });
+  const g = c.getContext('2d');
+  const fx = make(g, c);
+  let w, h, raf, last = performance.now();
+  const size = () => {
+    w = innerWidth; h = innerHeight;
+    const s = lowRes ? lowRes / w : Math.min(devicePixelRatio || 1, 2);
+    c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+    g.setTransform(s, 0, 0, s, 0, 0);
+    fx.resize?.(w, h);
+    if (still) fx.frame(0, 0, w, h);
+  };
+  const tick = now => {
+    fx.frame(Math.min((now - last) / 1000, 0.05), now / 1000, w, h);
+    last = now;
+    if (!still) raf = requestAnimationFrame(tick);
+  };
+  size();
+  addEventListener('resize', size);
+  stage.replaceChildren(c);
+  raf = requestAnimationFrame(tick);
+  return () => { cancelAnimationFrame(raf); removeEventListener('resize', size); };
+}
+
+const vGradient = (g, h, ...stops) => {
+  const grad = g.createLinearGradient(0, 0, 0, h);
+  stops.forEach((col, i) => grad.addColorStop(i / (stops.length - 1), col));
+  return grad;
+};
+
+// Snow: soft flakes at different depths; nearer ones are bigger, brighter and faster, all swaying
+function snowFx(g) {
+  let flakes = [], bg;
+  const flake = (w, h, anywhere) => {
+    const d = R() ** 2;   // mostly distant flakes
+    return { d, x: R() * w, y: anywhere ? R() * h : -5, r: 0.8 + d * 3.2, v: 14 + d * 50, a: 0.35 + d * 0.6,
+             amp: 8 + d * 22, sw: 0.4 + R() * 0.8, ph: R() * 6.3 };
+  };
+  return {
+    resize(w, h) {
+      bg = vGradient(g, h, '#0c121d', '#1a2331');
+      flakes = Array.from({ length: Math.round(w * h / 2800) }, () => flake(w, h, true));
+    },
+    frame(dt, t, w, h) {
+      g.fillStyle = bg; g.fillRect(0, 0, w, h);
+      for (const f of flakes) {
+        f.y += f.v * dt;
+        const x = f.x + Math.sin(t * f.sw + f.ph) * f.amp + t * 6 * f.d;   // sway plus a light breeze
+        if (f.y > h + 5) Object.assign(f, flake(w, h, false));
+        g.fillStyle = `rgba(235,242,255,${f.a})`;
+        g.beginPath(); g.arc(((x % (w + 10)) + w + 10) % (w + 10) - 5, f.y, f.r, 0, 6.283); g.fill();
+      }
+    },
+  };
+}
+
+// Rain: thin slanted streaks at different depths, small ripples where near drops land, mist at the bottom
+function rainFx(g) {
+  let drops = [], ripples = [], bg, mist;
+  const WIND = -0.12;   // horizontal slant per unit of fall
+  const drop = (w, h, anywhere) => {
+    const d = R();
+    return { d, x: R() * (w + h * 0.15), y: anywhere ? R() * h : -40 - R() * 60, len: 10 + d * 24, v: 520 + d * 680,
+             a: 0.07 + d * 0.28, lw: 0.6 + d * 0.9, land: h * (0.86 + R() * 0.14) };
+  };
+  return {
+    resize(w, h) {
+      bg = vGradient(g, h, '#080b10', '#0f151d', '#151d27');
+      mist = g.createLinearGradient(0, h * 0.7, 0, h);
+      mist.addColorStop(0, 'rgba(120,140,160,0)'); mist.addColorStop(1, 'rgba(120,140,160,0.08)');
+      drops = Array.from({ length: Math.round(w * h / 3500) }, () => drop(w, h, true));
+      ripples = [];
+    },
+    frame(dt, t, w, h) {
+      g.fillStyle = bg; g.fillRect(0, 0, w, h);
+      g.lineCap = 'round';
+      for (const p of drops) {
+        p.y += p.v * dt; p.x += p.v * WIND * dt;
+        if (p.d > 0.7 && p.y > p.land) {   // near drops splash on the "ground"
+          ripples.push({ x: p.x, y: p.land, age: 0, a: p.a * 1.6 });
+          Object.assign(p, drop(w, h, false));
+        } else if (p.y - p.len > h) Object.assign(p, drop(w, h, false));
+        g.strokeStyle = `rgba(175,200,225,${p.a})`; g.lineWidth = p.lw;
+        g.beginPath(); g.moveTo(p.x, p.y); g.lineTo(p.x - p.len * WIND, p.y - p.len); g.stroke();
+      }
+      g.lineWidth = 0.8;
+      ripples = ripples.filter(r => (r.age += dt) < 0.45);
+      for (const r of ripples) {
+        const k = r.age / 0.45;
+        g.strokeStyle = `rgba(175,200,225,${r.a * (1 - k)})`;
+        g.beginPath(); g.ellipse(r.x, r.y, 2 + k * 9, 0.6 + k * 2, 0, 0, 6.283); g.stroke();
+      }
+      g.fillStyle = mist; g.fillRect(0, h * 0.7, w, h * 0.3);
+    },
+  };
+}
+
+// Lava lamp: metaballs drifting up and down, merging into pools at the bottom and top.
+// The field is computed on a small canvas and stretched to the window, which keeps it cheap and soft.
+function lavaFx(g, c) {
+  const blobs = Array.from({ length: 7 }, (_, i) => ({
+    x: 0.15 + (i / 6) * 0.7 + (R() - 0.5) * 0.08, r: 0.055 + R() * 0.05,
+    period: 28 + R() * 34, ph: R() * 6.3, ph2: R() * 6.3,
+  }));
+  const BG_TOP = [24, 6, 40], BG_BOT = [58, 8, 38], LAVA_TOP = [255, 70, 125], LAVA_BOT = [255, 165, 55];
+  let img;
+  return {
+    resize() { img = g.createImageData(c.width, c.height); },
+    frame(dt, t) {
+      const W = c.width, H = c.height, data = img.data, diag = Math.hypot(W, H);
+      const pos = blobs.map(b => ({
+        x: (b.x + 0.05 * Math.sin(t * 6.283 / (b.period * 1.7) + b.ph2)) * W,
+        y: (0.5 + 0.47 * Math.sin(t * 6.283 / b.period + b.ph)) * H,
+        rr: (b.r * diag) ** 2,
+      }));
+      for (let y = 0, i = 0; y < H; y++) {
+        const fy = y / (H - 1);
+        const pool = 1.15 * fy ** 10 + 0.8 * (1 - fy) ** 14;   // wax pooled at the bottom, a little at the top
+        for (let x = 0; x < W; x++, i += 4) {
+          let f = pool;
+          for (const p of pos) { const dx = x - p.x, dy = y - p.y; f += p.rr / (dx * dx + dy * dy + 1); }
+          const a = Math.min(1, Math.max(0, (f - 0.92) / 0.16));   // soft edge around the threshold
+          const glow = Math.min(1, f) ** 3 * 0.22;                   // warm haze around each blob
+          for (let k = 0; k < 3; k++) {
+            const bgc = BG_TOP[k] + (BG_BOT[k] - BG_TOP[k]) * fy, lava = LAVA_TOP[k] + (LAVA_BOT[k] - LAVA_TOP[k]) * fy;
+            data[i + k] = bgc + (lava - bgc) * Math.max(a, glow);
+          }
+          data[i + 3] = 255;
+        }
+      }
+      g.putImageData(img, 0, 0);
+    },
+  };
+}
+
+// Synthwave: striped sunset sun behind mountains, with a glowing grid rolling toward you.
+// The sky, sun and mountains are drawn once per resize; only the grid is redrawn each frame.
+function synthFx(g, c) {
+  let sky, hz;
+  const GROUND = '#120024';
+  return {
+    resize(w, h) {
+      hz = Math.round(h * 0.58);
+      sky = document.createElement('canvas');
+      sky.width = c.width; sky.height = c.height;
+      const s = sky.getContext('2d');
+      s.setTransform(c.width / w, 0, 0, c.height / h, 0, 0);
+      const air = vGradient(s, hz, '#07000f', '#1d0636', '#5a0f5c', '#b21f6a');
+      s.fillStyle = air; s.fillRect(0, 0, w, hz);
+      for (let i = 0, n = w * hz / 2500; i < n; i++) {   // a few stars, fading toward the horizon
+        const y = R() ** 1.6 * hz * 0.75;
+        s.fillStyle = `rgba(255,255,255,${(0.2 + R() * 0.6) * (1 - y / (hz * 0.75))})`;
+        s.fillRect(R() * w, y, R() < 0.9 ? 1 : 2, 1);
+      }
+      const sr = Math.min(w, h) * 0.2, sx = w / 2, sy = hz - sr * 0.3;
+      const halo = s.createRadialGradient(sx, sy, sr * 0.6, sx, sy, sr * 2.4);
+      halo.addColorStop(0, 'rgba(255,60,150,0.35)'); halo.addColorStop(1, 'rgba(255,60,150,0)');
+      s.fillStyle = halo; s.fillRect(0, 0, w, hz);
+      const sun = s.createLinearGradient(0, sy - sr, 0, sy + sr);
+      sun.addColorStop(0, '#ffe46b'); sun.addColorStop(0.55, '#ff8a4c'); sun.addColorStop(1, '#ff2f8e');
+      s.fillStyle = sun; s.beginPath(); s.arc(sx, sy, sr, 0, 6.283); s.fill();
+      s.fillStyle = air;   // slice the lower half of the sun with bands of sky
+      for (let i = 0; i < 7; i++) s.fillRect(sx - sr, sy + sr * (0.08 + i * 0.13), sr * 2, 1.5 + i * 1.5);
+      for (const [shade, height, rough] of [['#2a0b44', 0.13, 0.9], ['#17062a', 0.08, 0.6]]) {   // two mountain ridges
+        s.fillStyle = shade; s.beginPath(); s.moveTo(0, hz);
+        let y = 0.5;
+        for (let x = 0; x <= w + 20; x += 18) {
+          y = Math.min(1, Math.max(0.1, y + (R() - 0.5) * rough));
+          const edge = 0.25 + 0.75 * Math.min(1, Math.abs(x / w - 0.5) * 2.6);   // lower in the middle, around the sun
+          s.lineTo(x, hz - y * edge * h * height);
+        }
+        s.lineTo(w, hz); s.closePath(); s.fill();
+      }
+      s.fillStyle = vGradient(s, h - hz, GROUND, '#05000c');
+      s.translate(0, hz);
+      s.fillRect(0, 0, w, h - hz);
+    },
+    frame(dt, t, w, h) {
+      g.drawImage(sky, 0, 0, w, h);
+      const depth = h - hz, cx = w / 2, gap = w / 9, shift = (t * 0.55) % 1;
+      g.beginPath();
+      for (let X = -40; X <= 40; X++) { g.moveTo(cx, hz); g.lineTo(cx + X * gap * 1.6, h + depth * 0.6 * 1.6); }
+      for (let i = 1; i < 60; i++) {
+        const z = i - shift;
+        if (z < 0.5) continue;
+        const y = hz + depth / z;
+        if (y > h + 2) continue;
+        g.moveTo(0, y); g.lineTo(w, y);
+      }
+      g.lineCap = 'butt';
+      g.strokeStyle = 'rgba(255,46,151,0.22)'; g.lineWidth = 4; g.stroke();   // glow
+      g.strokeStyle = '#ff4fa8'; g.lineWidth = 1.3; g.stroke();
+      const fade = g.createLinearGradient(0, hz, 0, hz + depth * 0.45);       // lines melt into the horizon haze
+      fade.addColorStop(0, GROUND); fade.addColorStop(1, 'rgba(18,0,36,0)');
+      g.fillStyle = fade; g.fillRect(0, hz, w, depth * 0.45);
+      g.fillStyle = 'rgba(255,90,170,0.55)'; g.fillRect(0, hz - 1, w, 1.5);   // bright horizon line
+    },
+  };
+}
+
+const FX = {
+  stars: { name: 'Starfield', start: starsFx },
+  snow:  { name: 'Snow',      start: () => canvasFx(snowFx) },
+  rain:  { name: 'Rain',      start: () => canvasFx(rainFx) },
+  lava:  { name: 'Lava lamp', start: () => canvasFx(lavaFx, 200) },
+  synth: { name: 'Synthwave', start: () => canvasFx(synthFx) },
+};
+let fxName = 'stars';
+try { if (FX[localStorage.getItem('fx')]) fxName = localStorage.getItem('fx'); } catch {}
+
+const markChips = active => document.querySelectorAll('#fxChips .chip').forEach(b => b.setAttribute('aria-pressed', b.dataset.fx === active));
+
+// Shows the chosen effect in place of any video (videoEngine stops whatever is on the stage)
+function showFx(name = fxName) {
+  videoEngine?.();
+  fxName = name;
+  try { localStorage.setItem('fx', name); } catch {}
+  videoEngine = FX[name].start();
+  markChips(name);
+  $('videoStatus').textContent = 'Showing: ' + FX[name].name;
+}
+
+for (const [key, fx] of Object.entries(FX)) {
+  const b = Object.assign(document.createElement('button'), { className: 'chip', textContent: fx.name });
+  b.dataset.fx = key;
+  b.onclick = () => showFx(key);
+  $('fxChips').append(b);
+}
 
 // ---- Video ----
 function embedUrl(url) {
@@ -630,6 +869,7 @@ function loadVideo() {
     // YouTube rejects embeds without a referrer (error 153), so override the page's no-referrer here
     f.referrerPolicy = 'strict-origin-when-cross-origin';
     stage.replaceChildren(f);
+    markChips(null);
     $('videoStatus').textContent = 'Embedded player loaded';
     return;
   }
@@ -638,19 +878,19 @@ function loadVideo() {
   v.addEventListener('playing', () => $('videoStatus').textContent = 'Playing (muted)');
   v.addEventListener('error', () => {
     if (!v.isConnected) return;  // replaced by another video meanwhile
-    showStarfield();
+    showFx();
     $('videoStatus').textContent = 'Couldn’t play that video';
-    toast('Couldn’t play that video, back to the starfield');
+    toast('Couldn’t play that video, back to ' + FX[fxName].name.toLowerCase());
   });
   stage.replaceChildren(v);
+  markChips(null);
   videoEngine = attach(v, url);
   v.play().catch(() => {});
   $('videoStatus').textContent = 'Loading…';
 }
 $('videoLoad').onclick = loadVideo;
 $('videoUrl').onkeydown = e => { if (e.key === 'Enter') loadVideo(); };
-$('videoClear').onclick = showStarfield;
-showStarfield();
+showFx();
 
 // ---- Favorites (stored in this browser, for http://localhost:8080) ----
 const DEFAULT_FAVS = {
