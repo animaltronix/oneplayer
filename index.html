@@ -245,10 +245,14 @@ function kindOf(url) {
 // Attach any URL to a <video>/<audio> element using the right engine. Returns a destroy fn.
 function attach(el, url) {
   const kind = kindOf(url);
-  if (kind === 'hls' && !el.canPlayType('application/vnd.apple.mpegurl') && window.Hls?.isSupported()) {
+  // Prefer hls.js even where the browser plays HLS itself (Safari, newer Chrome): only hls.js exposes
+  // segment titles, which many stations use for track info. Native HLS is the fallback.
+  if (kind === 'hls' && window.Hls?.isSupported()) {
     const hls = new Hls();
     hls.loadSource(url);
     hls.attachMedia(el);
+    // Many radio HLS streams label each segment "Artist - Title"; pass it on as the segment plays
+    hls.on(Hls.Events.FRAG_CHANGED, (_, d) => d.frag.title && el.dispatchEvent(new CustomEvent('segmenttitle', { detail: d.frag.title })));
     return () => hls.destroy();
   }
   if (kind === 'dash' && window.dashjs) {
@@ -311,6 +315,7 @@ function stopAudio() {
 
 function playStream(url) {
   stopAudio();
+  segmentTitle = null;
   audioEngine = attach(audio, url);
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), 15000));
   return Promise.race([audio.play(), timeout]);
@@ -438,7 +443,7 @@ addEventListener('keydown', resumeMix, { once: true });
 // Every 15 s, open a second short connection asking for in-stream metadata, read up to the
 // first title block, then hang up. Costs a few KB per check instead of a second full stream.
 const TRACK_POLL_MS = 15000;
-let trackUrl = null, trackTimer = null, trackBusy = false, nowTrack = null;
+let trackUrl = null, trackTimer = null, trackBusy = false, nowTrack = null, trackFails = 0;
 
 function setMini(title, station) {
   $('miniTitle').textContent = title;
@@ -494,22 +499,57 @@ async function fetchIcyInfo(url) {
 function startTrackInfo(url) {
   stopTrackInfo();
   trackUrl = url;
+  if (kindOf(url) === 'hls') {
+    // Titles arrive with the stream's segments (see attach); give up on the message if none come
+    setNow('Getting track info…', stationName(url));
+    trackTimer = setTimeout(() => { if (!nowTrack) showNoTrackInfo(url, 'This station doesn’t send track info'); }, 20000);
+    applySegmentTitle();
+    return;
+  }
   if (kindOf(url) !== 'direct') {
     setNow('Track info isn’t available for this kind of stream', 'Playing');
     return;
   }
   setNow('Getting track info…', 'Playing');
+  trackFails = 0;
   refreshTrackInfo();
   trackTimer = setInterval(refreshTrackInfo, TRACK_POLL_MS);
 }
 
 function stopTrackInfo() {
-  clearInterval(trackTimer);
+  clearInterval(trackTimer); clearTimeout(trackTimer);
   trackTimer = null; trackUrl = null; nowTrack = null;
   $('npTitle').textContent = 'Nothing playing';
   $('npStation').textContent = '';
   if (!connecting) setMini('One Player', 'Pick a station to start');
   updateSaveButton();
+}
+
+function showTrack(title, station) {
+  if (title === nowTrack?.title) return;
+  nowTrack = { title, station, at: Date.now() };
+  setNow(title, station);
+  addToHistory(nowTrack);
+  updateSaveButton();
+}
+
+// The favorite (yours or built-in) being played, matched by the stream URL or the playlist URL typed in
+const favFor = url => [...loadFavs('audio'), ...DEFAULT_FAVS.audio].find(f => f.url === url || f.url === $('audioUrl').value.trim());
+// A station's name for streams that don't announce one: its favorite's name, else the server name
+const stationName = url => favFor(url)?.name ?? new URL(url).hostname;
+// When there's no track info, show what's playing by its favorite's name (e.g. "KUTX Horizontes · Latest episode")
+function showNoTrackInfo(url, message) {
+  const fav = favFor(url);
+  fav ? setNow(fav.name, fav.note ?? message) : setNow(message);
+}
+
+// The latest HLS segment title is kept, since the first can arrive before track info starts
+let segmentTitle = null;
+audio.addEventListener('segmenttitle', e => { segmentTitle = e.detail.trim(); applySegmentTitle(); });
+function applySegmentTitle() {
+  if (!segmentTitle || !trackUrl || kindOf(trackUrl) !== 'hls') return;
+  if (/^you are listening to\b/i.test(segmentTitle)) return;   // station promos between songs, not tracks
+  showTrack(segmentTitle, stationName(trackUrl));
 }
 
 async function refreshTrackInfo() {
@@ -519,18 +559,16 @@ async function refreshTrackInfo() {
   try {
     const { station, title } = await fetchIcyInfo(url);
     if (url !== trackUrl) return;  // the user switched streams meanwhile
+    trackFails = 0;
     if (!title) {
-      if (!nowTrack) setNow('This station doesn’t send track info', station);
+      if (!nowTrack) showNoTrackInfo(url, 'This station doesn’t send track info');
       return;
     }
-    if (title !== nowTrack?.title) {
-      nowTrack = { title, station, at: Date.now() };
-      setNow(title, station);
-      addToHistory(nowTrack);
-      updateSaveButton();
-    }
+    showTrack(title, station);
   } catch {
-    if (url === trackUrl && !nowTrack) setNow('Couldn’t get track info from this station');
+    if (url !== trackUrl) return;
+    if (!nowTrack) showNoTrackInfo(url, 'Couldn’t get track info from this station');
+    if (++trackFails >= 3) clearInterval(trackTimer);   // the server refuses it (e.g. podcast hosts); stop asking
   } finally {
     trackBusy = false;
   }
@@ -987,6 +1025,20 @@ const DEFAULT_FAVS = {
     { name: 'SomaFM Groove Salad', url: 'https://somafm.com/groovesalad130.pls' },
     { name: 'SomaFM ThistleRadio', url: 'https://somafm.com/thistle130.pls' },
     { name: 'Radio Paradise', url: 'https://stream.radioparadise.com/aac-128' },
+    // KUTX (Austin). AMX and TMX use KUT's HLS (.m3u8) playlists: 192 kbps AAC, with track titles.
+    // The shows are each one's latest full episode (about 3 hours), not live streams.
+    { name: 'AMX: The Austin Music Experience', url: 'https://streams.kut.org/4429/playlist.m3u8', note: 'All-Austin music, from KUTX', added: 2 },
+    { name: 'TMX: The Texas Music Experience', url: 'https://streams.kut.org/4430/playlist.m3u8', note: 'New and old Texas music, from KUTX', added: 2 },
+    { name: 'KUTX Soundfounder', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/soundfounder/soundfounder.mp3', note: 'Latest episode · Electronic and beat music', added: 2 },
+    { name: 'KUTX What’s Next', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/whatsnext/whatsnext.mp3', note: 'Latest episode · New music with Jeff McCord', added: 2 },
+    { name: 'KUTX Old School Dance Party', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/oldschool/oldschool.mp3', note: 'Latest episode · John E. Dee', added: 2 },
+    { name: 'KUTX Left of the Dial', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/leftofthedial/leftofthedial.mp3', note: 'Latest episode · New music with Rick McNulty', added: 2 },
+    { name: 'KUTX Groove Temple', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/thegroovetemple/thegroovetemple.mp3', note: 'Latest episode · Deep house with DJ Shani', added: 2 },
+    { name: 'KUTX Uptown Saturday Night', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/satnight/satnight.mp3', note: 'Latest episode · R&B, soul and funk with Paul Carruba', added: 2 },
+    { name: 'KUTX The Breaks', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/thebreaks/thebreaks.mp3', note: 'Latest episode · Hip hop with Confucius and Fresh', added: 2 },
+    { name: 'KUTX Jazz with Jay Trachtenberg', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/sundayjazz/sundayjazz.mp3', note: 'Latest episode · Sunday jazz', added: 2 },
+    { name: 'KUTX Spare the Rock', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/sparetherock/sparetherock.mp3', note: 'Latest episode · Kid-friendly indie', added: 2 },
+    { name: 'KUTX Horizontes', url: 'https://ondemand.kut.org/fdd/audio/download/kut/on-demand/horizontes/horizontes.mp3', note: 'Latest episode · Latin American music with Alex Marrero', added: 2 },
   ],
   video: [
     { name: 'Fireplace (3 h)', url: 'https://archive.org/download/TheBestFireplaceVideo3HoursHD/The%20Best%20Fireplace%20Video%20(3%20hours)%20HD.mp4' },
@@ -998,6 +1050,21 @@ const DEFAULT_FAVS = {
   ],
 };
 
+// Built-in favorites added in later versions (marked `added`) are offered once to people who already
+// have a saved list, so new stations show up without bringing back any they removed.
+for (const kind of ['audio', 'video']) {
+  try {
+    const stored = JSON.parse(localStorage.getItem('favs-' + kind));
+    const seenKey = 'favs-seen-' + kind;
+    const seen = JSON.parse(localStorage.getItem(seenKey)) ?? DEFAULT_FAVS[kind].filter(f => !f.added).map(f => f.url);
+    if (stored) {
+      const fresh = DEFAULT_FAVS[kind].filter(f => !seen.includes(f.url) && !stored.some(x => x.url === f.url));
+      if (fresh.length) localStorage.setItem('favs-' + kind, JSON.stringify([...stored, ...fresh]));
+    }
+    localStorage.setItem(seenKey, JSON.stringify(DEFAULT_FAVS[kind].map(f => f.url)));
+  } catch {}
+}
+
 function loadFavs(kind) {
   try { return JSON.parse(localStorage.getItem('favs-' + kind)) ?? DEFAULT_FAVS[kind]; }
   catch { return DEFAULT_FAVS[kind]; }
@@ -1007,7 +1074,7 @@ function saveFavs(kind, list) {
   renderFavs(kind);
 }
 function renderFavs(kind) {
-  $(kind + 'Favs').replaceChildren(...loadFavs(kind).map(f => listItem(f.name, null, () => {
+  $(kind + 'Favs').replaceChildren(...loadFavs(kind).map(f => listItem(f.name, f.note, () => {
     $(kind + 'Url').value = f.url;
     $(kind + 'Url').dispatchEvent(new Event('change'));
     setPanel(null);
